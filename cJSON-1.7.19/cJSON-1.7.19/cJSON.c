@@ -492,17 +492,23 @@ CJSON_PUBLIC(double) cJSON_SetNumberHelper(cJSON *object, double number)
 }
 
 /* Note: when passing a NULL valuestring, cJSON_SetValuestring treats this as an error and return NULL */
+/*设置字符串值的辅助函数
+  用于更新cJSON字符串节点的值字符串，处理内存管理和安全性检查
+  确保只有非引用类型的字符串节点才能设置值字符串，避免内存泄漏和重叠内存复制问题*/
 CJSON_PUBLIC(char*) cJSON_SetValuestring(cJSON *object, const char *valuestring)
 {
     char *copy = NULL;
     size_t v1_len;
     size_t v2_len;
     /* if object's type is not cJSON_String or is cJSON_IsReference, it should not set valuestring */
-    if ((object == NULL) || !(object->type & cJSON_String) || (object->type & cJSON_IsReference))
+    if ((object == NULL) || !(object->type & cJSON_String) || (object->type & cJSON_IsReference))//检查对象是否为NULL,字符串或引用类型
     {
         return NULL;
     }
     /* return NULL if the object is corrupted or valuestring is NULL */
+    /*检查数据完整性：
+    如果对象的valuestring为NULL或者传入的valuestring参数为NULL
+    函数返回NULL表示设置失败*/
     if (object->valuestring == NULL || valuestring == NULL)
     {
         return NULL;
@@ -511,7 +517,7 @@ CJSON_PUBLIC(char*) cJSON_SetValuestring(cJSON *object, const char *valuestring)
     v1_len = strlen(valuestring);
     v2_len = strlen(object->valuestring);
 
-    if (v1_len <= v2_len)
+    if (v1_len <= v2_len)//如果新字符串长度不超过当前字符串长度，直接覆盖原有内存，重用已有缓冲区
     {
         /* strcpy does not handle overlapping string: [X1, X2] [Y1, Y2] => X2 < Y1 or Y2 < X1 */
         if (!( valuestring + v1_len < object->valuestring || object->valuestring + v2_len < valuestring ))
@@ -521,58 +527,69 @@ CJSON_PUBLIC(char*) cJSON_SetValuestring(cJSON *object, const char *valuestring)
         strcpy(object->valuestring, valuestring);
         return object->valuestring;
     }
-    copy = (char*) cJSON_strdup((const unsigned char*)valuestring, &global_hooks);
+    //新字符串长度超过当前字符串长度，需要重新分配内存
+    copy = (char*) cJSON_strdup((const unsigned char*)valuestring, &global_hooks);//使用cJSON_strdup将内存所有权转移到cJSON节点
     if (copy == NULL)
     {
         return NULL;
     }
-    if (object->valuestring != NULL)
+    if (object->valuestring != NULL)//释放原有内存
     {
         cJSON_free(object->valuestring);
     }
-    object->valuestring = copy;
-
+    object->valuestring = copy;//更新节点的值字符串指针
     return copy;
 }
+  
 
+/*cJSON_Print→ print_value → print_string / print_number → 
+printbuffer → 最终输出
+printbuffer结构体用于在打印JSON字符串时管理输出缓冲区*/
 typedef struct
 {
     unsigned char *buffer;
-    size_t length;
-    size_t offset;
+    size_t length;//缓冲区的总长度，即容量上限
+    size_t offset;//当前写入位置的偏移量，表示已经写入的数据长度
     size_t depth; /* current nesting depth (for formatted printing) */
+    //记录当前的嵌套深度，用于格式化输出时控制缩进和换行
     cJSON_bool noalloc;
+    /*标记是否禁止自动扩展缓冲区，以便设置不同的内存状态
+    noalloc=true禁止扩容，采用预分配缓冲区的静态模式
+    noalloc=false允许扩容，动态缓冲区自动扩容，无限写入*/
     cJSON_bool format; /* is this print a formatted print */
-    internal_hooks hooks;
+    //标记是否进行格式化打印
+    internal_hooks hooks;//钩子结构体，允许用户自定义内存相关函数，确保在打印过程中使用一致的内存管理策略
 } printbuffer;
 
+
 /* realloc printbuffer if necessary to have at least "needed" bytes more */
+//内存扩容函数,确保printbuffer有足够的空间来写入新的数据
 static unsigned char* ensure(printbuffer * const p, size_t needed)
 {
     unsigned char *newbuffer = NULL;
     size_t newsize = 0;
 
-    if ((p == NULL) || (p->buffer == NULL))
+    if ((p == NULL) || (p->buffer == NULL))//结构体完整性检查
     {
         return NULL;
     }
 
-    if ((p->length > 0) && (p->offset >= p->length))
+    if ((p->length > 0) && (p->offset >= p->length))//检查写入位置是否有效
     {
         /* make sure that offset is valid */
         return NULL;
     }
 
-    if (needed > INT_MAX)
+    if (needed > INT_MAX)//检查请求的空间大小是否超过INT_MAX，防止整数溢出
     {
         /* sizes bigger than INT_MAX are currently not supported */
         return NULL;
     }
 
-    needed += p->offset + 1;
+    needed += p->offset + 1;//计算总的所需空间，包括当前偏移量和新数据长度，外加1字节用于字符串结束符'\0'
     if (needed <= p->length)
     {
-        return p->buffer + p->offset;
+        return p->buffer + p->offset;//如果当前缓冲区已经有足够的空间，直接返回当前写入位置的指针，无需扩容
     }
 
     if (p->noalloc) {
@@ -580,7 +597,7 @@ static unsigned char* ensure(printbuffer * const p, size_t needed)
     }
 
     /* calculate new buffer size */
-    if (needed > (INT_MAX / 2))
+    if (needed > (INT_MAX / 2))//2倍扩容处理
     {
         /* overflow of int, use INT_MAX if possible */
         if (needed <= INT_MAX)
@@ -597,11 +614,11 @@ static unsigned char* ensure(printbuffer * const p, size_t needed)
         newsize = needed * 2;
     }
 
-    if (p->hooks.reallocate != NULL)
+    if (p->hooks.reallocate != NULL)//有reallocate钩子，使用它进行扩容
     {
         /* reallocate with realloc if available */
         newbuffer = (unsigned char*)p->hooks.reallocate(p->buffer, newsize);
-        if (newbuffer == NULL)
+        if (newbuffer == NULL)//扩容失败，释放原有缓冲区并重置状态
         {
             p->hooks.deallocate(p->buffer);
             p->length = 0;
@@ -613,7 +630,8 @@ static unsigned char* ensure(printbuffer * const p, size_t needed)
     else
     {
         /* otherwise reallocate manually */
-        newbuffer = (unsigned char*)p->hooks.allocate(newsize);
+        //没有reallocate钩子，手动分配新缓冲区并复制原有数据
+        newbuffer = (unsigned char*)p->hooks.allocate(newsize);//allocate分配新内存
         if (!newbuffer)
         {
             p->hooks.deallocate(p->buffer);
@@ -623,16 +641,17 @@ static unsigned char* ensure(printbuffer * const p, size_t needed)
             return NULL;
         }
 
-        memcpy(newbuffer, p->buffer, p->offset + 1);
-        p->hooks.deallocate(p->buffer);
+        memcpy(newbuffer, p->buffer, p->offset + 1);//memcpy复制旧数据
+        p->hooks.deallocate(p->buffer);//deallocate释放旧内存
     }
     p->length = newsize;
-    p->buffer = newbuffer;
+    p->buffer = newbuffer;//重置printbuffer的长度和缓冲区指针
 
     return newbuffer + p->offset;
 }
 
 /* calculate the new length of the string in a printbuffer and update the offset */
+//计算字符串长度并更新printbuffer的偏移量
 static void update_offset(printbuffer * const buffer)
 {
     const unsigned char *buffer_pointer = NULL;
@@ -645,7 +664,10 @@ static void update_offset(printbuffer * const buffer)
     buffer->offset += strlen((const char*)buffer_pointer);
 }
 
+
+
 /* securely comparison of floating-point variables */
+//双精度浮点数的比较
 static cJSON_bool compare_double(double a, double b)
 {
     double maxVal = fabs(a) > fabs(b) ? fabs(a) : fabs(b);
@@ -653,6 +675,9 @@ static cJSON_bool compare_double(double a, double b)
 }
 
 /* Render the number nicely from the given item into a string. */
+/*数值序列化函数
+将数字cJSON转换为字符串，处理格式化和本地化问题
+与parse_number对称*/
 static cJSON_bool print_number(const cJSON * const item, printbuffer * const output_buffer)
 {
     unsigned char *output_pointer = NULL;
@@ -663,26 +688,34 @@ static cJSON_bool print_number(const cJSON * const item, printbuffer * const out
     unsigned char decimal_point = get_decimal_point();
     double test = 0.0;
 
-    if (output_buffer == NULL)
+    if (output_buffer == NULL)//输出缓冲区检查，确保有有效的printbuffer来写入结果
     {
         return false;
     }
 
     /* This checks for NaN and Infinity */
+    /*使用isnan和isinf检查数字是否为NaN或Infinity
+     如果是这些特殊值，直接将字符串"null"写入输出缓冲区，符合JSON规范对这些值的处理方式
+     其他情况下，继续进行正常的数字格式化处理*/
     if (isnan(d) || isinf(d))
     {
         length = sprintf((char*)number_buffer, "null");
     }
-    else if(d == (double)item->valueint)
+    else if(d == (double)item->valueint)//如果数字的双精度表示与整数表示相等，说明这个数字可以安全地表示为整数
     {
         length = sprintf((char*)number_buffer, "%d", item->valueint);
     }
     else
     {
         /* Try 15 decimal places of precision to avoid nonsignificant nonzero digits */
+        /*首先尝试使用15位小数的精度来格式化数字
+         通过限制小数位数得到更符合预期的输出*/
         length = sprintf((char*)number_buffer, "%1.15g", d);
 
         /* Check whether the original double can be recovered */
+        /*使用sscanf将格式化后的字符串转换回双精度数，并与原始数字进行比较，验证格式化的准确性
+         如果得到的数字与原始数字不匹配
+         增加到17位小数的精度进行重新格式化*/
         if ((sscanf((char*)number_buffer, "%lg", &test) != 1) || !compare_double((double)test, d))
         {
             /* If not, print with 17 decimal places of precision */
@@ -692,12 +725,14 @@ static cJSON_bool print_number(const cJSON * const item, printbuffer * const out
 
     /* sprintf failed or buffer overrun occurred */
     if ((length < 0) || (length > (int)(sizeof(number_buffer) - 1)))
+    //检查sprintf的返回值，确保格式化成功且没有发生缓冲区溢出
     {
         return false;
     }
 
     /* reserve appropriate space in the output */
     output_pointer = ensure(output_buffer, (size_t)length + sizeof(""));
+    //调用ensure函数确保输出缓冲区有足够的空间来写入格式化后的数字字符串
     if (output_pointer == NULL)
     {
         return false;
@@ -706,6 +741,7 @@ static cJSON_bool print_number(const cJSON * const item, printbuffer * const out
     /* copy the printed number to the output and replace locale
      * dependent decimal point with '.' */
     for (i = 0; i < ((size_t)length); i++)
+    //将格式化后的数字字符串从number_buffer复制到输出缓冲区，同时将本地化的小数点字符替换为JSON标准的小数点'.'
     {
         if (number_buffer[i] == decimal_point)
         {
@@ -717,12 +753,13 @@ static cJSON_bool print_number(const cJSON * const item, printbuffer * const out
     }
     output_pointer[i] = '\0';
 
-    output_buffer->offset += (size_t)length;
+    output_buffer->offset += (size_t)length;//更新输出缓冲区的偏移量
 
     return true;
 }
 
 /* parse 4 digit hexadecimal number */
+//解析4位十六进制数字
 static unsigned parse_hex4(const unsigned char * const input)
 {
     unsigned int h = 0;
@@ -760,6 +797,7 @@ static unsigned parse_hex4(const unsigned char * const input)
 
 /* converts a UTF-16 literal to UTF-8
  * A literal can be one or two sequences of the form \uXXXX */
+//将UTF-16字面量转换为UTF-8
 static unsigned char utf16_literal_to_utf8(const unsigned char * const input_pointer, const unsigned char * const input_end, unsigned char **output_pointer)
 {
     long unsigned int codepoint = 0;
@@ -881,27 +919,30 @@ fail:
 }
 
 /* Parse the input text into an unescaped cinput, and populate item. */
+//解析字符串函数
 static cJSON_bool parse_string(cJSON * const item, parse_buffer * const input_buffer)
 {
-    const unsigned char *input_pointer = buffer_at_offset(input_buffer) + 1;
-    const unsigned char *input_end = buffer_at_offset(input_buffer) + 1;
-    unsigned char *output_pointer = NULL;
+    const unsigned char *input_pointer = buffer_at_offset(input_buffer) + 1;//输入缓冲区指针，指向字符串内容的开始位置
+    const unsigned char *input_end = buffer_at_offset(input_buffer) + 1;//用于扫描字符串直到结束引号
+    unsigned char *output_pointer = NULL;//输出缓冲区指针，指向解码后的字符串位置
     unsigned char *output = NULL;
 
     /* not a string */
-    if (buffer_at_offset(input_buffer)[0] != '\"')
+    if (buffer_at_offset(input_buffer)[0] != '\"')//检查的第一个字符是否为双引号，如果不是，说明不是一个有效的JSON字符串
     {
         goto fail;
     }
 
-    {
+    {   /*第一遍扫描；计算输出字符串的长度
+         通过扫描输入字符串直到遇到未转义的结束引号，计算出输出字符串的实际长度
+         以在分配内存时能够准确地知道需要多少空间来存储解码后的字符串*/
         /* calculate approximate size of the output (overestimate) */
         size_t allocation_length = 0;
         size_t skipped_bytes = 0;
-        while (((size_t)(input_end - input_buffer->content) < input_buffer->length) && (*input_end != '\"'))
+        while (((size_t)(input_end - input_buffer->content) < input_buffer->length) && (*input_end != '\"'))//扫描输入字符串直到遇到未转义的结束引号，确保不超过输入缓冲区的长度
         {
             /* is escape sequence */
-            if (input_end[0] == '\\')
+            if (input_end[0] == '\\')//如果当前字符是反斜杠，跳过转义字符和被转义的字符
             {
                 if ((size_t)(input_end + 1 - input_buffer->content) >= input_buffer->length)
                 {
@@ -913,38 +954,41 @@ static cJSON_bool parse_string(cJSON * const item, parse_buffer * const input_bu
             }
             input_end++;
         }
+        //扫描结束时没有找到结束引号，说明字符串未正确结束
         if (((size_t)(input_end - input_buffer->content) >= input_buffer->length) || (*input_end != '\"'))
         {
             goto fail; /* string ended unexpectedly */
         }
 
         /* This is at most how much we need for the output */
+        /*计算输出字符串的长度，总字符数 - 转义符数 = 实际需要的字节数*/
         allocation_length = (size_t) (input_end - buffer_at_offset(input_buffer)) - skipped_bytes;
-        output = (unsigned char*)input_buffer->hooks.allocate(allocation_length + sizeof(""));
+        output = (unsigned char*)input_buffer->hooks.allocate(allocation_length + sizeof(""));//分配内存来存储解码后的字符串
         if (output == NULL)
         {
             goto fail; /* allocation failure */
         }
     }
 
-    output_pointer = output;
+    output_pointer = output;//初始化输出指针，准备写入解码后的字符串
     /* loop through the string literal */
+    /*第二次扫描：解码转义序列，生成实际字符串*/
     while (input_pointer < input_end)
     {
         if (*input_pointer != '\\')
         {
-            *output_pointer++ = *input_pointer++;
+            *output_pointer++ = *input_pointer++;// 普通字符，直接复制
         }
         /* escape sequence */
-        else
+        else//如果遇到转义符，处理转义序列，根据转义字符的类型进行相应的解码
         {
             unsigned char sequence_length = 2;
-            if ((input_end - input_pointer) < 1)
+            if ((input_end - input_pointer) < 1)//检查转义序列是否完整
             {
                 goto fail;
             }
 
-            switch (input_pointer[1])
+            switch (input_pointer[1])//根据转义字符的类型进行解码
             {
                 case 'b':
                     *output_pointer++ = '\b';
@@ -968,7 +1012,7 @@ static cJSON_bool parse_string(cJSON * const item, parse_buffer * const input_bu
                     break;
 
                 /* UTF-16 literal */
-                case 'u':
+                case 'u'://如果转义序列是Unicode，调用utf16_literal_to_utf8函数将其转换为UTF-8编码并输出
                     sequence_length = utf16_literal_to_utf8(input_pointer, input_end, &output_pointer);
                     if (sequence_length == 0)
                     {
@@ -980,29 +1024,31 @@ static cJSON_bool parse_string(cJSON * const item, parse_buffer * const input_bu
                 default:
                     goto fail;
             }
-            input_pointer += sequence_length;
+            input_pointer += sequence_length;//跳过转义序列，继续扫描下一个字符
         }
     }
 
     /* zero terminate the output */
-    *output_pointer = '\0';
+    *output_pointer = '\0';//添加字符串结束符'\0'
 
+    //设置cJSON节点的类型和值字符串指针，转移内存所有权，完成字符串解析
     item->type = cJSON_String;
     item->valuestring = (char*)output;
+    //所有权转移到cJSON节点
 
-    input_buffer->offset = (size_t) (input_end - input_buffer->content);
-    input_buffer->offset++;
+    input_buffer->offset = (size_t) (input_end - input_buffer->content);//更新输入缓冲区的偏移量，跳过已解析的字符串内容
+    input_buffer->offset++;//跳过结束引号
 
     return true;
 
-fail:
-    if (output != NULL)
+fail://解析失败处理，释放已分配的内存并重置状态
+    if (output != NULL)//解析失败，释放内存
     {
         input_buffer->hooks.deallocate(output);
         output = NULL;
     }
 
-    if (input_pointer != NULL)
+    if (input_pointer != NULL)//输入指针不为NULL，恢复offset停在错误位置
     {
         input_buffer->offset = (size_t)(input_pointer - input_buffer->content);
     }
@@ -1011,6 +1057,9 @@ fail:
 }
 
 /* Render the cstring provided to an escaped version that can be printed. */
+/*字符串序列化函数
+ 将C字符串转换为JSON字符串
+ 作为parse_string的逆操作*/
 static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffer * const output_buffer)
 {
     const unsigned char *input_pointer = NULL;
@@ -1020,25 +1069,26 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
     /* numbers of additional characters needed for escaping */
     size_t escape_characters = 0;
 
-    if (output_buffer == NULL)
+    if (output_buffer == NULL)//确保printbuffer不为空
     {
         return false;
     }
 
     /* empty string */
-    if (input == NULL)
+    if (input == NULL)//处理空字符串
     {
-        output = ensure(output_buffer, sizeof("\"\""));
+        output = ensure(output_buffer, sizeof("\"\""));//ensure请求3字节
         if (output == NULL)
         {
             return false;
         }
-        strcpy((char*)output, "\"\"");
+        strcpy((char*)output, "\"\"");//strcpy写入空字符串的JSON表示
 
         return true;
     }
 
     /* set "flag" to 1 if something needs to be escaped */
+    //第一遍扫描：统计需要转义的字符数量，以便计算输出字符串的长度
     for (input_pointer = input; *input_pointer; input_pointer++)
     {
         switch (*input_pointer)
@@ -1051,26 +1101,31 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
             case '\r':
             case '\t':
                 /* one character escape sequence */
+                //统计每个需要转义的字符会增加一个反斜杠，escape_characters增加1
                 escape_characters++;
                 break;
             default:
                 if (*input_pointer < 32)
                 {
                     /* UTF-16 escape sequence uXXXX */
+                    //对于控制字符使用Unicode转义序列\uXXXX来表示，escape_characters增加5
                     escape_characters += 5;
                 }
                 break;
         }
     }
-    output_length = (size_t)(input_pointer - input) + escape_characters;
+    output_length = (size_t)(input_pointer - input) + escape_characters;//计算输出字符串的总长度，包括原始字符和转义字符
 
-    output = ensure(output_buffer, output_length + sizeof("\"\""));
+     /* allocate space for the output */
+     //分配内存，长度为计算出的输出字符串长度加上两对引号和字符串结束符的空间
+     output = ensure(output_buffer, output_length + sizeof("\"\""));
     if (output == NULL)
     {
         return false;
     }
 
     /* no characters have to be escaped */
+    //如果没有需要转义的字符，直接将输入字符串用引号包裹起来写入输出缓冲区
     if (escape_characters == 0)
     {
         output[0] = '\"';
@@ -1082,11 +1137,12 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
     }
 
     output[0] = '\"';
-    output_pointer = output + 1;
+    output_pointer = output + 1;//初始化输出指针，准备写入转义后的字符串内容
     /* copy the string */
+    //第二遍扫描：生成转义后的字符串，处理每个字符，根据需要添加转义符并写入输出缓冲区
     for (input_pointer = input; *input_pointer != '\0'; (void)input_pointer++, output_pointer++)
     {
-        if ((*input_pointer > 31) && (*input_pointer != '\"') && (*input_pointer != '\\'))
+        if ((*input_pointer > 31) && (*input_pointer != '\"') && (*input_pointer != '\\'))//如果当前字符不需要转义，直接复制
         {
             /* normal character, copy */
             *output_pointer = *input_pointer;
@@ -1094,6 +1150,7 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
         else
         {
             /* character needs to be escaped */
+            //需要转义的字符，首先写入一个反斜杠，然后根据转义字符的类型写入相应的转义序列
             *output_pointer++ = '\\';
             switch (*input_pointer)
             {
@@ -1133,12 +1190,14 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
 }
 
 /* Invoke print_string_ptr (which is useful) on an item. */
+//调用print_string_ptr函数将cJSON字符串节点的值字符串进行转义和格式化
 static cJSON_bool print_string(const cJSON * const item, printbuffer * const p)
 {
     return print_string_ptr((unsigned char*)item->valuestring, p);
 }
 
 /* Predeclare these prototypes. */
+//声明解析和打印函数
 static cJSON_bool parse_value(cJSON * const item, parse_buffer * const input_buffer);
 static cJSON_bool print_value(const cJSON * const item, printbuffer * const output_buffer);
 static cJSON_bool parse_array(cJSON * const item, parse_buffer * const input_buffer);
@@ -1147,6 +1206,7 @@ static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_bu
 static cJSON_bool print_object(const cJSON * const item, printbuffer * const output_buffer);
 
 /* Utility to jump whitespace and cr/lf */
+//跳过输入缓冲区中的空白字符和控制字符
 static parse_buffer *buffer_skip_whitespace(parse_buffer * const buffer)
 {
     if ((buffer == NULL) || (buffer->content == NULL))
@@ -1159,7 +1219,7 @@ static parse_buffer *buffer_skip_whitespace(parse_buffer * const buffer)
         return buffer;
     }
 
-    while (can_access_at_index(buffer, 0) && (buffer_at_offset(buffer)[0] <= 32))
+    while (can_access_at_index(buffer, 0) && (buffer_at_offset(buffer)[0] <= 32))//跳过空白字符和控制字符，直到遇到非空白字符或达到缓冲区的末尾
     {
        buffer->offset++;
     }
@@ -1173,6 +1233,7 @@ static parse_buffer *buffer_skip_whitespace(parse_buffer * const buffer)
 }
 
 /* skip the UTF-8 BOM (byte order mark) if it is at the beginning of a buffer */
+//跳过UTF-8 BOM如果它位于缓冲区的开头
 static parse_buffer *skip_utf8_bom(parse_buffer * const buffer)
 {
     if ((buffer == NULL) || (buffer->content == NULL) || (buffer->offset != 0))
@@ -1188,6 +1249,7 @@ static parse_buffer *skip_utf8_bom(parse_buffer * const buffer)
     return buffer;
 }
 
+//提供不同的选项来控制解析行为
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithOpts(const char *value, const char **return_parse_end, cJSON_bool require_null_terminated)
 {
     size_t buffer_length;
@@ -1204,15 +1266,20 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithOpts(const char *value, const char **return
 }
 
 /* Parse an object - create a new root, and populate. */
+/*解析JSON字符串，创建cJSON对象树
+作为带长度限制、BOM处理、精确错误定位解析接口*/
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer_length, const char **return_parse_end, cJSON_bool require_null_terminated)
 {
     parse_buffer buffer = { 0, 0, 0, 0, { 0, 0, 0 } };
     cJSON *item = NULL;
 
     /* reset error position */
+    //解析错误位置重置，以便在解析过程中记录错误
     global_error.json = NULL;
     global_error.position = 0;
 
+    /*与cJSON_Parse的核心区别
+    cJSON_Parse信任字符串以'\0'结尾*/
     if (value == NULL || 0 == buffer_length)
     {
         goto fail;
@@ -1223,12 +1290,15 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer
     buffer.offset = 0;
     buffer.hooks = global_hooks;
 
-    item = cJSON_New_Item(&global_hooks);
+    item = cJSON_New_Item(&global_hooks);//创建新的cJSON节点作为解析结果的根节点
     if (item == NULL) /* memory fail */
     {
         goto fail;
     }
 
+     /*调用skip_utf8_bom跳过UTF-8 BOM，
+     然后调用buffer_skip_whitespace跳过前导空白字符
+     最后调用parse_value开始解析JSON字符串*/
     if (!parse_value(item, buffer_skip_whitespace(skip_utf8_bom(&buffer))))
     {
         /* parse failure. ep is set. */
@@ -1236,15 +1306,16 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer
     }
 
     /* if we require null-terminated JSON without appended garbage, skip and then check for a null terminator */
+    //如果require_null_terminated为true，表示要求JSON字符串必须以'\0'结尾且没有附加的垃圾数据
     if (require_null_terminated)
     {
         buffer_skip_whitespace(&buffer);
-        if ((buffer.offset >= buffer.length) || buffer_at_offset(&buffer)[0] != '\0')
+        if ((buffer.offset >= buffer.length) || buffer_at_offset(&buffer)[0] != '\0')//检查当前偏移位置是否已经达到输入缓冲区的末尾，或者当前字符是否为'\0'，如果不是，说明JSON字符串没有正确结束
         {
             goto fail;
         }
     }
-    if (return_parse_end)
+    if (return_parse_end)//设置return_parse_end参数指向解析结束的位置
     {
         *return_parse_end = (const char*)buffer_at_offset(&buffer);
     }
@@ -1252,18 +1323,18 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer
     return item;
 
 fail:
-    if (item != NULL)
+    if (item != NULL)//解析失败，删除已创建的cJSON节点，释放内存
     {
         cJSON_Delete(item);
     }
 
-    if (value != NULL)
+    if (value != NULL)//如果输入字符串不为NULL，设置全局错误信息，记录错误位置
     {
         error local_error;
         local_error.json = (const unsigned char*)value;
         local_error.position = 0;
 
-        if (buffer.offset < buffer.length)
+        if (buffer.offset < buffer.length)//如果当前偏移位置在输入缓冲区的范围内，设置错误位置为当前偏移位置，否则设置为输入缓冲区的末尾
         {
             local_error.position = buffer.offset;
         }
@@ -1272,40 +1343,49 @@ fail:
             local_error.position = buffer.length - 1;
         }
 
-        if (return_parse_end != NULL)
+        if (return_parse_end != NULL)//如果return_parse_end参数不为NULL，设置它指向错误位置
         {
             *return_parse_end = (const char*)local_error.json + local_error.position;
         }
 
-        global_error = local_error;
+        global_error = local_error;//将局部错误信息保存到全局变量global_error中
     }
 
     return NULL;
 }
 
-/* Default options for cJSON_Parse */
+
+/*感觉cJSON_ParseWithOpts和cJSON_ParseWithLengthOpts像C++中函数重载的C处理*/
+//默认的解析接口，调用cJSON_ParseWithOpts并传递默认参数
 CJSON_PUBLIC(cJSON *) cJSON_Parse(const char *value)
 {
     return cJSON_ParseWithOpts(value, 0, 0);
 }
-
+//带长度限制的解析接口，调用cJSON_ParseWithLengthOpts并传递buffer_length
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithLength(const char *value, size_t buffer_length)
 {
     return cJSON_ParseWithLengthOpts(value, buffer_length, 0, 0);
 }
 
-#define cjson_min(a, b) (((a) < (b)) ? (a) : (b))
+#define cjson_min(a, b) (((a) < (b)) ? (a) : (b))//定义宏cjson_min，用于计算两个值中的较小者
 
+/*print流程：创建并配置printbuffer
+ 调用print_value递归遍历整个JSON树
+ 根据hooks配置，选择最优方式返回结果
+ */
 static unsigned char *print(const cJSON * const item, cJSON_bool format, const internal_hooks * const hooks)
 {
-    static const size_t default_buffer_size = 256;
+    static const size_t default_buffer_size = 256;//默认缓冲区大小，初始分配256字节的内存来存储打印结果
     printbuffer buffer[1];
+    /*栈上printbuffer用于存储打印过程中使用的缓冲区和相关信息
+     buffer[1]自动退化为指针*/
     unsigned char *printed = NULL;
 
-    memset(buffer, 0, sizeof(buffer));
+    memset(buffer, 0, sizeof(buffer));//初始化printbuffer结构体，将所有字段设置为0
 
     /* create buffer */
-    buffer->buffer = (unsigned char*) hooks->allocate(default_buffer_size);
+    buffer->buffer = (unsigned char*) hooks->allocate(default_buffer_size);//调用hooks的allocate函数分配内存
+    //初始化printbuffer
     buffer->length = default_buffer_size;
     buffer->format = format;
     buffer->hooks = *hooks;
@@ -1315,22 +1395,26 @@ static unsigned char *print(const cJSON * const item, cJSON_bool format, const i
     }
 
     /* print the value */
-    if (!print_value(item, buffer))
+    if (!print_value(item, buffer))//调用print_value函数递归遍历整个JSON树
     {
         goto fail;
     }
     update_offset(buffer);
+    /*print_value 在写入过程中不断更新offset，但某些路径可能直接操作buffer而不更新offset
+     调用update_offset函数更新printbuffer的偏移量
+     确保offset反映真实写入位置*/
 
     /* check if reallocate is available */
-    if (hooks->reallocate != NULL)
-    {
+    if (hooks->reallocate != NULL)//根据hooks配置，选择最优方式返回结果
+    {//路径1：有reallocate钩子，直接在原缓冲区上调整大小以适应最终字符串的长度
         printed = (unsigned char*) hooks->reallocate(buffer->buffer, buffer->offset + 1);
         if (printed == NULL) {
             goto fail;
         }
-        buffer->buffer = NULL;
+        buffer->buffer = NULL;//将buffer指针置空，表示所有权已经转移给printed变量
     }
     else /* otherwise copy the JSON over to a new buffer */
+    //路径2：没有reallocate钩子，分配一个新的缓冲区，复制打印结果并添加字符串结束符
     {
         printed = (unsigned char*) hooks->allocate(buffer->offset + 1);
         if (printed == NULL)
@@ -1341,20 +1425,20 @@ static unsigned char *print(const cJSON * const item, cJSON_bool format, const i
         printed[buffer->offset] = '\0'; /* just to be sure */
 
         /* free the buffer */
-        hooks->deallocate(buffer->buffer);
+        hooks->deallocate(buffer->buffer);//释放原缓冲区的内存
         buffer->buffer = NULL;
     }
 
     return printed;
 
 fail:
-    if (buffer->buffer != NULL)
+    if (buffer->buffer != NULL)//解析失败，释放原缓冲区的内存
     {
         hooks->deallocate(buffer->buffer);
         buffer->buffer = NULL;
     }
 
-    if (printed != NULL)
+    if (printed != NULL)//释放已经分配的新缓冲区
     {
         hooks->deallocate(printed);
         printed = NULL;
@@ -1364,38 +1448,43 @@ fail:
 }
 
 /* Render a cJSON item/entity/structure to text. */
-CJSON_PUBLIC(char *) cJSON_Print(const cJSON *item)
+/*提供不同的选项来控制打印行为，cJSON_Print完全托管,内部决定一切
+cJSON_PrintBuffered用户有建议权
+cJSON_PrintPreallocated完全用户控制
+*/
+CJSON_PUBLIC(char *) cJSON_Print(const cJSON *item)//传递format参数为true，格式化输出
 {
     return (char*)print(item, true, &global_hooks);
 }
 
-CJSON_PUBLIC(char *) cJSON_PrintUnformatted(const cJSON *item)
+CJSON_PUBLIC(char *) cJSON_PrintUnformatted(const cJSON *item)//传递format参数为false，不格式化输出
 {
     return (char*)print(item, false, &global_hooks);
 }
 
+//提供允许指定预分配缓冲区大小和格式化选项的打印接口
 CJSON_PUBLIC(char *) cJSON_PrintBuffered(const cJSON *item, int prebuffer, cJSON_bool fmt)
 {
-    printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };
+    printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };//创建并初始化printbuffer结构体
 
     if (prebuffer < 0)
     {
         return NULL;
     }
 
-    p.buffer = (unsigned char*)global_hooks.allocate((size_t)prebuffer);
+    p.buffer = (unsigned char*)global_hooks.allocate((size_t)prebuffer);//根据预分配大小调用hooks的allocate函数分配内存
     if (!p.buffer)
     {
         return NULL;
     }
-
+    //初始化printbuffer
     p.length = (size_t)prebuffer;
     p.offset = 0;
-    p.noalloc = false;
+    p.noalloc = false;//允许扩容，是与PrintPreallocated的核心区别
     p.format = fmt;
     p.hooks = global_hooks;
 
-    if (!print_value(item, &p))
+    if (!print_value(item, &p))//调用print_value函数递归遍历整个JSON树进行打印
     {
         global_hooks.deallocate(p.buffer);
         p.buffer = NULL;
@@ -1404,7 +1493,8 @@ CJSON_PUBLIC(char *) cJSON_PrintBuffered(const cJSON *item, int prebuffer, cJSON
 
     return (char*)p.buffer;
 }
-
+/*提供允许用户提供预分配缓冲区的打印接口，避免内部分配内存
+用户负责提供缓冲区，指定确切大小，保证缓冲区在整个打印过程中有效*/
 CJSON_PUBLIC(cJSON_bool) cJSON_PrintPreallocated(cJSON *item, char *buffer, const int length, const cJSON_bool format)
 {
     printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };
@@ -1417,7 +1507,7 @@ CJSON_PUBLIC(cJSON_bool) cJSON_PrintPreallocated(cJSON *item, char *buffer, cons
     p.buffer = (unsigned char*)buffer;
     p.length = (size_t)length;
     p.offset = 0;
-    p.noalloc = true;
+    p.noalloc = true;//不允许扩容
     p.format = format;
     p.hooks = global_hooks;
 

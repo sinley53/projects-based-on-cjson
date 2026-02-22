@@ -550,7 +550,7 @@ typedef struct
     unsigned char *buffer;
     size_t length;//缓冲区的总长度，即容量上限
     size_t offset;//当前写入位置的偏移量，表示已经写入的数据长度
-    size_t depth; /* current nesting depth (for formatted printing) */
+    size_t depth; 
     //记录当前的嵌套深度，用于格式化输出时控制缩进和换行
     cJSON_bool noalloc;
     /*标记是否禁止自动扩展缓冲区，以便设置不同的内存状态
@@ -559,6 +559,11 @@ typedef struct
     cJSON_bool format; /* is this print a formatted print */
     //标记是否进行格式化打印
     internal_hooks hooks;//钩子结构体，允许用户自定义内存相关函数，确保在打印过程中使用一致的内存管理策略
+    //新增美化选项
+    char indent_char; //字符用于缩进，默认'\t'，支持用户自定义缩进字符
+    size_t indent_size; //每个缩进级别的indent_char数量，默认1，支持用户自定义缩进宽度
+    cJSON_bool sort_keys; //标记是否对对象键进行排序，默认0不排序
+    cJSON_bool array_multiline; //标记数组是否始终以多行格式打印，默认0
 } printbuffer;
 
 
@@ -672,6 +677,17 @@ static cJSON_bool compare_double(double a, double b)
 {
     double maxVal = fabs(a) > fabs(b) ? fabs(a) : fabs(b);
     return (fabs(a - b) <= maxVal * DBL_EPSILON);
+}
+
+
+static int sort_cjson_keys(const void *a, const void *b)//cJSON对象键的排序函数
+{
+    const cJSON *ia = *(const cJSON * const *)a;//将void指针转换为cJSON指针，获取对象的键字符串进行比较
+    const cJSON *ib = *(const cJSON * const *)b;
+    if ((ia == NULL || ia->string == NULL) && (ib == NULL || ib->string == NULL)) return 0;//如果两个键都为NULL，认为它们相等，返回0
+    if (ia == NULL || ia->string == NULL) return 1;//如果ia的键为NULL，认为它大于ib，返回1
+    if (ib == NULL || ib->string == NULL) return -1;//如果ib的键为NULL，认为ia小于ib，返回-1
+    return strcmp(ia->string, ib->string);//使用strcmp进行字符串比较，返回结果决定排序顺序
 }
 
 /* Render the number nicely from the given item into a string. */
@@ -1367,7 +1383,7 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLength(const char *value, size_t buffer_len
     return cJSON_ParseWithLengthOpts(value, buffer_length, 0, 0);
 }
 
-#define cjson_min(a, b) (((a) < (b)) ? (a) : (b))//定义宏cjson_min，用于计算两个值中的较小者
+#define cjson_min(a, b) (((a) < (b)) ? (a) : (b)) //定义宏函数cjson_min，用于计算两个值中的较小者
 
 /*print流程：创建并配置printbuffer
  调用print_value递归遍历整个JSON树
@@ -1447,7 +1463,6 @@ fail:
     return NULL;
 }
 
-/* Render a cJSON item/entity/structure to text. */
 /*提供不同的选项来控制打印行为，cJSON_Print完全托管,内部决定一切
 cJSON_PrintBuffered用户有建议权
 cJSON_PrintPreallocated完全用户控制
@@ -1465,7 +1480,7 @@ CJSON_PUBLIC(char *) cJSON_PrintUnformatted(const cJSON *item)//传递format参�
 //提供允许指定预分配缓冲区大小和格式化选项的打印接口
 CJSON_PUBLIC(char *) cJSON_PrintBuffered(const cJSON *item, int prebuffer, cJSON_bool fmt)
 {
-    printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };//创建并初始化printbuffer结构体
+    printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 }, '\t', 1, 0, 0 };//创建并初始化printbuffer结构体
 
     if (prebuffer < 0)
     {
@@ -1493,11 +1508,74 @@ CJSON_PUBLIC(char *) cJSON_PrintBuffered(const cJSON *item, int prebuffer, cJSON
 
     return (char*)p.buffer;
 }
+//提供一个专门的接口来生成美化格式的JSON字符串，预设格式化选项
+CJSON_PUBLIC(char *) cJSON_PrintBeautified(const cJSON *item)
+{
+    static const size_t default_buffer_size = 256;//默认缓冲区大小，初始分配256字节的内存来存储打印结果
+    printbuffer buffer[1];
+    unsigned char *printed = NULL;//创建并初始化printbuffer结构体
+
+    memset(buffer, 0, sizeof(buffer));//初始化printbuffer结构体，将所有字段设置为0
+
+ 
+    buffer->buffer = (unsigned char*) global_hooks.allocate(default_buffer_size);
+    if (!buffer->buffer)//根据默认缓冲区大小调用hooks的allocate函数分配内存，如果分配失败，返回NULL
+    {
+        return NULL;
+    }
+    buffer->length = default_buffer_size;
+    buffer->format = true;
+    buffer->hooks = global_hooks;
+
+    //预设格式化选项，使用空格进行缩进，使用键排序和数组换行
+    buffer->indent_char = ' ';
+    buffer->indent_size = 4;
+    buffer->sort_keys = 1;
+    buffer->array_multiline = 1;
+
+    if (!print_value(item, buffer))//调用print_value函数递归遍历整个JSON树进行打印
+    {
+        global_hooks.deallocate(buffer->buffer);
+        buffer->buffer = NULL;
+        return NULL;
+    }
+
+    update_offset(buffer);
+
+     //根据hooks配置，选择最优方式返回结果
+    if (buffer->hooks.reallocate != NULL)
+    {
+        printed = (unsigned char*) buffer->hooks.reallocate(buffer->buffer, buffer->offset + 1);//有reallocate钩子，直接在原缓冲区上调整大小以适应最终字符串的长度
+        if (printed == NULL)//如果reallocate失败，释放原缓冲区的内存并返回NULL
+        {
+            global_hooks.deallocate(buffer->buffer);//释放原缓冲区的内存
+            buffer->buffer = NULL;
+            return NULL;
+        }
+        buffer->buffer = NULL;//将buffer指针置空，表示所有权已经转移给printed变量
+    }
+    else//没有reallocate钩子，分配一个新的缓冲区，复制打印结果并添加字符串结束符
+    {
+        printed = (unsigned char*) buffer->hooks.allocate(buffer->offset + 1);
+        if (printed == NULL)
+        {
+            global_hooks.deallocate(buffer->buffer);
+            buffer->buffer = NULL;
+            return NULL;
+        }
+        memcpy(printed, buffer->buffer, cjson_min(buffer->length, buffer->offset + 1));//复制打印结果到新缓冲区
+        printed[buffer->offset] = '\0';
+        buffer->hooks.deallocate(buffer->buffer);//释放原缓冲区的内存
+        buffer->buffer = NULL;
+    }
+
+    return (char*)printed;
+}
 /*提供允许用户提供预分配缓冲区的打印接口，避免内部分配内存
 用户负责提供缓冲区，指定确切大小，保证缓冲区在整个打印过程中有效*/
 CJSON_PUBLIC(cJSON_bool) cJSON_PrintPreallocated(cJSON *item, char *buffer, const int length, const cJSON_bool format)
 {
-    printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };
+    printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 }, '\t', 1, 0, 0 };
 
     if ((length < 0) || (buffer == NULL))
     {
@@ -1793,7 +1871,6 @@ fail:
 static cJSON_bool print_array(const cJSON * const item, printbuffer * const output_buffer)
 {
     unsigned char *output_pointer = NULL;//输出缓冲区指针，指向生成的JSON字符串位置
-    size_t length = 0;
     cJSON *current_element = item->child;//获取数组的第一个元素
 
     if (output_buffer == NULL)
@@ -1801,8 +1878,13 @@ static cJSON_bool print_array(const cJSON * const item, printbuffer * const outp
         return false;
     }
 
-    /* Compose the output array. */
-    /* opening square bracket */
+    /*数组的打印过程
+     首先写入左方括号'['，然后根据格式化选项决定是否添加换行和缩进
+     接着循环遍历数组中的元素，递归调用print_value生成每个元素的JSON表示，并将它们连接起来形成完整的数组字符串
+     最后根据格式化选项决定是否添加换行和缩进，并写入右方括号']'完成数组的打印
+     与parse_array对称，实现了从cJSON节点到JSON字符串的转换*/
+
+     //写入数组开头（左方括号 [）
     output_pointer = ensure(output_buffer, 1);//为左方括号'['分配空间
     if (output_pointer == NULL)
     {
@@ -1810,46 +1892,116 @@ static cJSON_bool print_array(const cJSON * const item, printbuffer * const outp
     }
 
     *output_pointer = '[';
-    output_buffer->offset++;
-    output_buffer->depth++;
+    output_buffer->offset++;//向缓冲区写入 [，并更新缓冲区偏移量 
+
+    //格式化模式下的开头换行与缩进加深
+    if (output_buffer->format && output_buffer->array_multiline)
+    {
+        output_pointer = ensure(output_buffer, 2);
+        if (output_pointer == NULL) return false;
+        *output_pointer++ = '\n';
+        output_buffer->offset += 1;//写入换行符\n，offset +1
+        output_buffer->depth++;//增加缩进深度（数组内的元素需要比数组本身多一层缩进）
+    }
 
     while (current_element != NULL)//循环遍历数组中的元素，调用print_value递归生成每个元素的JSON表示，并将它们连接起来形成完整的数组字符串
     {
-        if (!print_value(current_element, output_buffer))//为当前元素生成JSON字符串，失败返回false
+        if (output_buffer->format && output_buffer->array_multiline)//如果启用格式化输出并且数组元素需要换行，为当前元素添加适当的缩进
+        {
+            size_t i;
+            //计算缩进所需空间：depth * 缩进字符数
+            output_pointer = ensure(output_buffer, output_buffer->depth * (output_buffer->indent_size ? output_buffer->indent_size : 1));
+            if (output_pointer == NULL) return false;
+            //写入缩进字符（默认\t，也可通过indent_char设为空格）
+            for (i = 0; i < output_buffer->depth * (output_buffer->indent_size ? output_buffer->indent_size : 1); i++)//根据indent_size和indent_char设置缩进字符，默认使用制表符'\t'
+            {
+                *output_pointer++ = (unsigned char)(output_buffer->indent_char ? output_buffer->indent_char : '\t');
+            }
+            *output_pointer = '\0';//临时终止符，避免缓冲区内容被误判为未结束的字符串，不影响最终结果
+            //更新偏移量：加上缩进字符的总长度
+            output_buffer->offset += output_buffer->depth * (output_buffer->indent_size ? output_buffer->indent_size : 1);
+        }
+
+        /*递归序列化当前元素
+        调用print_value序列化元素时，若元素本身是数组，会递归调用 print_array
+        实现任意层级嵌套数组的序列化
+        */
+        if (!print_value(current_element, output_buffer))
         {
             return false;
         }
-        update_offset(output_buffer);//更新输出缓冲区的偏移量，确保它反映了当前写入的位置
+        update_offset(output_buffer);//更新输出缓冲区的偏移量
 
          /*如果当前元素不是数组中的最后一个元素，添加逗号分隔符
          如果format选项启用，还会添加一个空格，实现格式化输出*/
         if (current_element->next)
         {
-            length = (size_t) (output_buffer->format ? 2 : 1);//计算逗号分隔符的长度，如果启用格式化输出长度为2
-            output_pointer = ensure(output_buffer, length + 1);//为逗号分隔符分配空间
-            if (output_pointer == NULL)
-            {
-                return false;
+           /* 三种模式：
+            多行格式化：,\n
+            单行格式化：, 
+            紧凑模式：, */
+            output_pointer = ensure(output_buffer, 2);
+            if (output_pointer == NULL) return false;
+            *output_pointer++ = ',';//写入逗号
+            output_buffer->offset += 1;
+
+            if (output_buffer->format && output_buffer->array_multiline)
+            {   
+                //多行模式：逗号后加换行
+                *output_pointer++ = '\n';
+                output_buffer->offset += 1;
+                *output_pointer = '\0';
             }
-            *output_pointer++ = ',';
-            if(output_buffer->format)//如果启用格式化输出，添加一个空格
-            {
+            else if (output_buffer->format)
+            {  
+                //单行模式：逗号后加空格
                 *output_pointer++ = ' ';
+                *output_pointer = '\0';
+                output_buffer->offset += 1;
             }
-            *output_pointer = '\0';
-            output_buffer->offset += length;
+            else
+            {
+                //紧凑模式：仅逗号
+                *output_pointer = '\0';
+            }
         }
         current_element = current_element->next;//移动到下一个元素继续循环
     }
 
-    output_pointer = ensure(output_buffer, 2);//为右方括号']'和字符串结束符分配空间
-    if (output_pointer == NULL)
+    //写入数组结尾（右方括号 ]）
+
+    /*格式化多行模式
+    根据格式化选项决定是否添加换行和缩进
+    然后写入右方括号']'完成数组的打印*/
+    if (output_buffer->format && output_buffer->array_multiline)
     {
-        return false;
+        //申请空间：换行符，缩进字符和]的总长度
+        output_pointer = ensure(output_buffer, (output_buffer->depth * (output_buffer->indent_size ? output_buffer->indent_size : 1)) + 2);
+        if (output_pointer == NULL) return false;
+        *output_pointer++ = '\n';//写入换行符\n，offset +1
+         //写入缩进字符（默认\t，也可通过indent_char设为空格）
+        {
+            size_t i;
+            for (i = 0; i < (output_buffer->depth - 1) * (output_buffer->indent_size ? output_buffer->indent_size : 1); i++)
+            {
+                *output_pointer++ = (unsigned char)(output_buffer->indent_char ? output_buffer->indent_char : '\t');
+            }
+        }
+        *output_pointer++ = ']';
+        *output_pointer = '\0';
+        output_buffer->offset += (1 + (output_buffer->depth - 1) * (output_buffer->indent_size ? output_buffer->indent_size : 1));
+        output_buffer->depth--;//减少缩进深度，回到数组所在的层级
     }
-    *output_pointer++ = ']';
-    *output_pointer = '\0';
-    output_buffer->depth--;//完成数组的打印，更新嵌套深度
+    else//非格式化单行模式
+    {
+        output_pointer = ensure(output_buffer, 2);//为右方括号']'和字符串结束符分配空间
+        if (output_pointer == NULL)
+        {
+            return false;
+        }
+        *output_pointer++ = ']';
+        *output_pointer = '\0';
+    }
 
     return true;
 }
@@ -1980,27 +2132,31 @@ fail:
 
 /* Render an object to text. */
 /*对象打印函数，递归生成对象的JSON表示
+将cJSON对象节点序列化为JSON格式的字符串，支持紧凑格式和带缩进，换行和键排序的格式
 与parse_object对称*/
 static cJSON_bool print_object(const cJSON * const item, printbuffer * const output_buffer)
 {
     unsigned char *output_pointer = NULL;
     size_t length = 0;
     cJSON *current_item = item->child;//获取对象的第一个键值对节点
+    cJSON **sorted = NULL;//启用键排序，sorted将指向一个cJSON指针数组，存储对象中的键值对节点，后续排序和打印
+    size_t sorted_count = 0;//记录对象中键值对的数量，排序后用于遍历输出
+    size_t idx = 0;//索引变量，用于遍历sorted数组
+    cJSON_bool has_next = 0;//指示当前键值对是否有下一个节点，决定是否添加逗号分隔符
 
     if (output_buffer == NULL)
     {
         return false;
     }
 
-    /* Compose the output: */
     /*对象的JSON表示以左大括号'{'开头，右大括号'}'结尾，键值对之间用逗号分隔
      每个键值对的键和值之间用冒号分隔
      如果启用格式化输出，还会在适当的位置添加换行符和缩进
      实现了格式化规则，并递归调用print_value生成每个键值对的JSON表示*/
 
-     /* opening brace */
+     
      //为左大括号'{'分配空间，长度根据是否启用格式化输出而定
-    length = (size_t) (output_buffer->format ? 2 : 1); /* fmt: {\n */
+    length = (size_t) (output_buffer->format ? 2 : 1); //如果启用格式化输出，长度为2（包括左大括号和换行符），否则长度为1（仅左大括号）
     output_pointer = ensure(output_buffer, length + 1);//为左大括号'{'和可能的换行符分配空间
     if (output_pointer == NULL)
     {
@@ -2008,39 +2164,72 @@ static cJSON_bool print_object(const cJSON * const item, printbuffer * const out
     }
 
     *output_pointer++ = '{';
-    output_buffer->depth++;//增加嵌套深度，准备打印对象的内容
+    output_buffer->depth++;//增加嵌套深度，对象内的键值对需要比对象本身多一层缩进
     if (output_buffer->format)//如果启用格式化输出，在左大括号后添加换行符
     {
         *output_pointer++ = '\n';
     }
     output_buffer->offset += length;//更新输出缓冲区的偏移量，反映已写入的字符数
 
-    while (current_item)//循环遍历对象中的键值对节点，生成每个键值对的JSON表示，并将它们连接起来形成完整的对象字符串
+
+    /*键名排序功能
+     启用键排序，统计对象中的键值对数量，分配一个cJSON指针数组来存储这些节点
+     使用qsort根据键名对数组进行排序
+     排序仅修改指针数组，不改动原链表结构
+     如果没有启用键排序，直接按照链表的顺序打印对象中的键值对*/
+    if (output_buffer->format && output_buffer->sort_keys && current_item)
     {
+        cJSON *iter = current_item;
+        while (iter) { sorted_count++; iter = iter->next; }//统计对象中的键值对数量
+        sorted = (cJSON**)output_buffer->hooks.allocate(sorted_count * sizeof(cJSON*));//为cJSON指针数组分配空间，长度为键值对数量乘以每个指针的大小
+        if (sorted == NULL) return false;
+        iter = current_item;//将对象中的键值对节点存储到数组中
+        {
+            size_t i = 0;
+            while (iter) { sorted[i++] = iter; iter = iter->next; }
+            //遍历对象中的键值对节点，将它们的指针存储到sorted数组中，对这个数组进行排序和打印
+        }
+      
+        qsort(sorted, sorted_count, sizeof(cJSON*), sort_cjson_keys);//调用qsort和sort_cjson_keys比较函数，按键名字符串升序排序
+    }
+
+    //遍历键值对并序列化
+    while (sorted ? (idx < sorted_count) : (current_item))//根据sorted标志决定使用排序后的数组还是原链表来遍历键值对节点
+    {
+        cJSON *item_to_print = sorted ? sorted[idx] : current_item;//获取当前要打印的键值对节点，根据sorted选择使用排序后的数组还是原链表
         if (output_buffer->format)//如果启用格式化输出，在每个键值对前添加适当的缩进
         {
             size_t i;
-            output_pointer = ensure(output_buffer, output_buffer->depth);//为缩进分配空间，长度根据当前嵌套深度而定
+            //计算缩进所需空间：depth * 缩进字符数，indent_size默认为1，indent_char默认为\t
+            size_t indent_chars = output_buffer->depth * (output_buffer->indent_size ? output_buffer->indent_size : 1);
+            output_pointer = ensure(output_buffer, indent_chars);//为缩进分配空间，长度根据当前嵌套深度而定
             if (output_pointer == NULL)
             {
+                if (sorted) output_buffer->hooks.deallocate(sorted);
                 return false;
             }
-            for (i = 0; i < output_buffer->depth; i++)//添加缩进
+            for (i = 0; i < indent_chars; i++)//添加缩进
             {
-                *output_pointer++ = '\t';
+                *output_pointer++ = (unsigned char)(output_buffer->indent_char ? output_buffer->indent_char : '\t');
             }
-            output_buffer->offset += output_buffer->depth;//更新偏移量，反映已写入的缩进字符数
+            *output_pointer = '\0';
+            output_buffer->offset += indent_chars;//更新偏移量，反映已写入的缩进字符数
         }
 
-        /* print key */
-        /*调用print_string_ptr函数生成键名的JSON表示，直接使用current_item->string作为输入
+        
+        /*序列化键名
+         调用print_string_ptr函数生成键名的JSON表示，直接使用current_item->string作为输入
          print_string_ptr函数负责处理转义序列和格式化规则*/
-        if (!print_string_ptr((unsigned char*)current_item->string, output_buffer))
+        if (!print_string_ptr((unsigned char*)item_to_print->string, output_buffer))
         {
+            if (sorted) output_buffer->hooks.deallocate(sorted);
             return false;
         }
-        update_offset(output_buffer);//更新输出缓冲区的偏移量,确保offset反映真实写入位置
+        update_offset(output_buffer);//同步print_string_ptr写入的长度
 
+         /*添加键值分隔符
+         根据格式化选项决定分隔符的长度和内容
+         紧凑模式仅使用冒号，格式化模式使用冒号加空格*/
         length = (size_t) (output_buffer->format ? 2 : 1);//计算键值分隔符的长度，如果启用格式化输出长度为2
         output_pointer = ensure(output_buffer, length);//分配空间
         if (output_pointer == NULL)
@@ -2050,43 +2239,56 @@ static cJSON_bool print_object(const cJSON * const item, printbuffer * const out
         *output_pointer++ = ':';
         if (output_buffer->format)
         {
-            *output_pointer++ = '\t';
+          //如果启用格式化输出，在冒号后添加一个空格，实现格式化输出
+            *output_pointer++ = (unsigned char)(output_buffer->indent_char == '\t' ? '\t' : ' ');
         }
         output_buffer->offset += length;
 
-        /* print value */
-        /*调用print_value函数生成值的JSON表示，递归处理值的类型和结构
+        
+        /*序列化值
+         调用print_value函数生成值的JSON表示，递归处理值的类型和结构
          print_value函数会根据值的类型调用相应的打印函数来生成JSON字符串*/
-        if (!print_value(current_item, output_buffer))
+        if (!print_value(item_to_print, output_buffer))
         {
+            if (sorted) output_buffer->hooks.deallocate(sorted);
             return false;
         }
         update_offset(output_buffer);
 
-        /* print comma if not last */
+        
         /*如果当前键值对不是对象中的最后一个，添加逗号分隔符
          如果启用格式化输出，还会添加一个换行符*/
-        length = ((size_t)(output_buffer->format ? 1 : 0) + (size_t)(current_item->next ? 1 : 0));
+
+       //判断是否有下一个元素：排序模式判断idx+1 < sorted_count；原链表看current_item->next 
+        has_next = sorted ? (cJSON_bool)(idx + 1 < sorted_count) : (cJSON_bool)(current_item->next != NULL);
+        //计算所需空间：格式化加换行和逗号，根据has_next和format选项决定需要添加逗号和换行符的长度
+        length = ((size_t)(output_buffer->format ? 1 : 0) + (size_t)(has_next ? 1 : 0));
         output_pointer = ensure(output_buffer, length + 1);
         if (output_pointer == NULL)
         {
             return false;
         }
-        if (current_item->next)
+        if (has_next)
         {
-            *output_pointer++ = ',';
+            *output_pointer++ = ',';//不是最后一个，添加逗号分隔符
         }
 
         if (output_buffer->format)
         {
-            *output_pointer++ = '\n';
+            *output_pointer++ = '\n';//格式化输出，在逗号后添加换行符
         }
         *output_pointer = '\0';
         output_buffer->offset += length;
 
-        current_item = current_item->next;//移动到下一个键值对节点继续循环
+        if (sorted) idx++; else current_item = current_item->next;//移动到下一个键值对节点继续循环
     }
-    
+    if (sorted) output_buffer->hooks.deallocate(sorted);//打印完成后释放排序数组
+
+     //写入对象结尾（右大括号 }）
+
+     /*根据格式化选项决定是否添加换行和缩进
+      然后写入右大括号'}'完成对象的打印*/
+
     output_pointer = ensure(output_buffer, output_buffer->format ? (output_buffer->depth + 1) : 2);//为右大括号'}'和换行符分配空间
     if (output_pointer == NULL)
     {
@@ -2095,9 +2297,11 @@ static cJSON_bool print_object(const cJSON * const item, printbuffer * const out
     if (output_buffer->format)//如果启用格式化输出，在右大括号前添加缩进
     {
         size_t i;
-        for (i = 0; i < (output_buffer->depth - 1); i++)
+        size_t indent_chars = (output_buffer->depth - 1) * (output_buffer->indent_size ? output_buffer->indent_size : 1);
+        for (i = 0; i < indent_chars; i++)
         {
-            *output_pointer++ = '\t';
+            *output_pointer++ = (unsigned char)(output_buffer->indent_char ? output_buffer->indent_char : '\t');
+            //写入缩进字符（默认\t，也可通过indent_char设为空格）
         }
     }
     *output_pointer++ = '}';

@@ -103,8 +103,7 @@ then using the CJSON_API_VISIBILITY flag to "export" the same symbols the way CJ
 
 // 特殊标志
 #define cJSON_IsReference 256 //引用标志，不会被释放
-#define cJSON_StringIsConst 512//常量字符串标志
-
+#define cJSON_StringIsConst 512
 /* The cJSON structure: */
 /* cJSON 结构体，使用链表来表示JSON数据：
 next/prev: 形成双向链表，用于表示数组元素或对象成员
@@ -203,6 +202,8 @@ CJSON_PUBLIC(char *) cJSON_PrintBuffered(const cJSON *item, int prebuffer, cJSON
 /* NOTE: cJSON is not always 100% accurate in estimating how much memory it will use, so to be safe allocate 5 bytes more than you actually need */
 /*使用用户提供的缓冲区*/
 CJSON_PUBLIC(cJSON_bool) cJSON_PrintPreallocated(cJSON *item, char *buffer, const int length, const cJSON_bool format);
+
+CJSON_PUBLIC(char *) cJSON_PrintBeautified(const cJSON *item);//生成美化的 JSON 字符串
 /* Delete a cJSON entity and all subentities. */
 /*删除cJSON节点*/
 CJSON_PUBLIC(void) cJSON_Delete(cJSON *item);
